@@ -710,6 +710,7 @@ table.data-table .num{text-align:right;font-variant-numeric:tabular-nums;white-s
                   <th class="sortable num" data-sort="plafon">Plafon (Rp)</th>
                   <th class="sortable num" data-sort="bakiDebet">Baki Debet (Rp)</th>
                   <th class="sortable num" data-sort="tunggakanPokok">Tunggakan (Rp)</th>
+                  <th class="sortable" data-sort="sukuBunga">Bunga/Tahun</th>
                   <th class="sortable" data-sort="tglAkadAwal">Tgl Akad</th>
                   <th class="sortable" data-sort="tglJatuhTempo">Jatuh Tempo</th>
                 </tr>
@@ -2758,7 +2759,7 @@ function renderFacilitiesTable(){
   const body = $('facilitiesBody');
   $('facilityCounter').textContent = `${State.filtered.length} dari ${State.parsed.facilities.length} fasilitas`;
   if(!State.filtered.length){
-    body.innerHTML = '<tr><td colspan="11" class="empty">Tidak ada fasilitas yang cocok dengan filter.</td></tr>';
+    body.innerHTML = '<tr><td colspan="12" class="empty">Tidak ada fasilitas yang cocok dengan filter.</td></tr>';
     return;
   }
   const rows = [];
@@ -2778,6 +2779,7 @@ function renderFacilitiesTable(){
         <td class="num">${fmtRupiah(f.plafon)}</td>
         <td class="num">${fmtRupiah(f.bakiDebet)}</td>
         <td class="num">${fmtRupiah((f.tunggakanPokok||0)+(f.tunggakanBunga||0))}</td>
+        <td style="text-align:center;font-weight:600;color:var(--brand-secondary)">${escapeHtml(f.sukuBunga || '-')}</td>
         <td>${escapeHtml(f.tglAkadAwal || '-')}</td>
         <td>${escapeHtml(f.tglJatuhTempo || '-')}</td>
       </tr>
@@ -2785,7 +2787,7 @@ function renderFacilitiesTable(){
     if(isExpanded){
       rows.push(`
         <tr class="detail-row" data-detail-for="${i}">
-          <td colspan="11">${renderFacilityDetail(f)}</td>
+          <td colspan="12">${renderFacilityDetail(f)}</td>
         </tr>
       `);
     }
@@ -3170,8 +3172,91 @@ function exportToExcel(){
     showToast('Menyiapkan file Excel...', 'info');
     const wb = XLSX.utils.book_new();
     
-    // Sheet 1: Header & Identitas
+    // ================================================================
+    // Sheet 1: RINGKASAN FASILITAS (format seperti gambar)
+    // Kolom: No, Nama Bank, Fasilitas Kredit, Plafond, Baki Debet,
+    //         Bunga Per Tahun, Kolektibilitas, Ket
+    // ================================================================
     const first = State.parsed.debtorEntries[0] || {};
+    const s = computeStatistics();
+    
+    const ringkasanHeader = [
+      ['LAPORAN SLIK OJK - RINGKASAN FASILITAS KREDIT'],
+      ['Nama Debitur', first.nama || '-'],
+      ['NIK', first.nik || '-'],
+      ['NPWP', first.npwp || '-'],
+      ['Posisi Data', State.parsed.header?.posisiData || '-'],
+      ['Nomor Laporan', State.parsed.header?.nomorLaporan || '-'],
+      [],
+    ];
+    
+    const ringkasanTableHead = ['No','Nama Bank','Fasilitas Kredit','Plafond','Baki Debet','Bunga Per Tahun','Kolektibilitas','Ket'];
+    
+    const allFacsRk = State.parsed.facilities;
+    const activeFacs = State.parsed.facilities.filter(f => f.kondisi && !/lunas/i.test(f.kondisi));
+    const lunasFacsRk = State.parsed.facilities.filter(f => f.kondisi && /lunas/i.test(f.kondisi));
+    
+    // Build the row set (data rows + TOTAL row) for one of the 3 ringkasan tables
+    function buildRingkasanRows(facsArr){
+      if(facsArr.length === 0){
+        return [['-', 'Tidak ada fasilitas pada kategori ini', '', '', '', '', '', '']];
+      }
+      const rows = facsArr.map((f, i) => [
+        i + 1,
+        f.pelapor || '-',
+        f.jenisKredit || '-',
+        f.plafon || 0,
+        f.bakiDebet || 0,
+        f.sukuBunga || '-',
+        f.kualitasKode || f.kualitas || '-',
+        f.keterangan || '-',
+      ]);
+      const totalPlafon = facsArr.reduce((s,f) => s + (f.plafon||0), 0);
+      const totalBaki = facsArr.reduce((s,f) => s + (f.bakiDebet||0), 0);
+      rows.push(['TOTAL', '', '', totalPlafon, totalBaki, '', '', '']);
+      return rows;
+    }
+    
+    // Progressively assemble the sheet, tracking each table's data-row range so we can
+    // apply number formatting (Plafond/Baki Debet columns) afterwards.
+    const ringkasanSheetRows = [...ringkasanHeader];
+    const ringkasanNumberRanges = [];
+    function pushRingkasanTable(title, facsArr){
+      ringkasanSheetRows.push([`${title} (${facsArr.length} fasilitas)`]);
+      ringkasanSheetRows.push(ringkasanTableHead);
+      const dataStart0 = ringkasanSheetRows.length; // 0-indexed row where data starts
+      const rows = buildRingkasanRows(facsArr);
+      rows.forEach(r => ringkasanSheetRows.push(r));
+      ringkasanSheetRows.push([]); // spacer between tables
+      ringkasanNumberRanges.push({ start0: dataStart0, count: facsArr.length === 0 ? 0 : rows.length });
+    }
+    pushRingkasanTable('TABEL 1: SEMUA FASILITAS KREDIT', allFacsRk);
+    pushRingkasanTable('TABEL 2: FASILITAS KREDIT MASIH AKTIF', activeFacs);
+    pushRingkasanTable('TABEL 3: FASILITAS KREDIT SUDAH LUNAS', lunasFacsRk);
+    
+    const ringkasanSheet = XLSX.utils.aoa_to_sheet(ringkasanSheetRows);
+    
+    // Column widths
+    ringkasanSheet['!cols'] = [
+      {wch:5},{wch:40},{wch:22},{wch:18},{wch:18},{wch:16},{wch:14},{wch:20}
+    ];
+    
+    // Style number columns (Plafond=col D, Baki Debet=col E) as numbers for every table
+    ringkasanNumberRanges.forEach(range => {
+      for(let ri = 0; ri < range.count; ri++){
+        const rowIdx = range.start0 + ri + 1; // convert 0-indexed row to 1-indexed Excel row
+        ['D','E'].forEach(col => {
+          const cell = ringkasanSheet[col + rowIdx];
+          if(cell && typeof cell.v === 'number'){
+            cell.z = '#,##0';
+          }
+        });
+      }
+    });
+    
+    XLSX.utils.book_append_sheet(wb, ringkasanSheet, 'Ringkasan Fasilitas');
+    
+    // Sheet 2: Identitas & Info Laporan
     const headerSheet = [
       ['LAPORAN SLIK OJK - RINGKASAN'],
       [],
@@ -3193,8 +3278,7 @@ function exportToExcel(){
     ];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(headerSheet), 'Ringkasan');
     
-    // Sheet 2: Statistik
-    const s = computeStatistics();
+    // Sheet 3: Statistik
     const statSheet = [
       ['STATISTIK FASILITAS'],
       [],
@@ -3460,6 +3544,82 @@ function exportToPdf(){
       },
     });
     y = doc.lastAutoTable.finalY + 8;
+    
+    // Ringkasan Fasilitas Kredit: 3 tabel — Semua, Masih Aktif, Sudah Lunas
+    // (format tabel: No, Nama Bank, Fasilitas Kredit, Plafond, Baki Debet, Bunga/Tahun, Kol, Ket)
+    if(y > 220){ doc.addPage(); y = 18; }
+    doc.setFontSize(12); doc.setFont(undefined, 'bold'); doc.setTextColor(0,61,122);
+    doc.text('RINGKASAN FASILITAS KREDIT', 14, y); y += 7;
+    
+    const activeFacsPdf = State.parsed.facilities.filter(f => f.kondisi && !/lunas/i.test(f.kondisi));
+    const lunasFacsPdf = State.parsed.facilities.filter(f => f.kondisi && /lunas/i.test(f.kondisi));
+    
+    function drawRingkasanFasilitasTable(title, facsArr){
+      if(y > 225){ doc.addPage(); y = 18; }
+      doc.setFontSize(10); doc.setFont(undefined, 'bold'); doc.setTextColor(0,61,122);
+      doc.text(`${title} (${facsArr.length} fasilitas)`, 14, y); y += 4.5;
+      doc.setFont(undefined, 'normal');
+      
+      let bodyRows;
+      if(facsArr.length === 0){
+        bodyRows = [['Tidak ada fasilitas pada kategori ini.', '', '', '', '', '', '', '']];
+      } else {
+        bodyRows = facsArr.map((f, i) => [
+          i+1,
+          (f.pelapor||'-').length>30 ? (f.pelapor||'').slice(0,28)+'…' : (f.pelapor||'-'),
+          f.jenisKredit || '-',
+          fmtRupiah(f.plafon),
+          fmtRupiah(f.bakiDebet),
+          f.sukuBunga || '-',
+          f.kualitasKode || f.kualitas || '-',
+          f.keterangan || '-',
+        ]);
+        const totPlafon = facsArr.reduce((acc,f) => acc+(f.plafon||0), 0);
+        const totBaki = facsArr.reduce((acc,f) => acc+(f.bakiDebet||0), 0);
+        bodyRows.push(['', 'TOTAL', '', fmtRupiah(totPlafon), fmtRupiah(totBaki), '', '', '']);
+      }
+      
+      doc.autoTable({
+        startY: y,
+        head:[['No','Nama Bank','Fasilitas Kredit','Plafond','Baki Debet','Bunga/Tahun','Kol','Ket']],
+        body: bodyRows,
+        theme:'grid',
+        styles:{fontSize:7.5, cellPadding:1.2},
+        headStyles:{fillColor:[0,61,122], textColor:255, fontSize:8, fontStyle:'bold'},
+        bodyStyles:{valign:'middle'},
+        didParseCell: function(data){
+          // Bold total row
+          if(facsArr.length > 0 && data.row.index === bodyRows.length - 1){
+            data.cell.styles.fontStyle = 'bold';
+            data.cell.styles.fillColor = [240,244,250];
+          }
+          // Color Kolektibilitas cell
+          if(data.column.index === 6 && data.section === 'body' && facsArr.length > 0 && data.row.index < bodyRows.length - 1){
+            const kol = parseInt(data.cell.raw, 10);
+            if(kol >= 3) data.cell.styles.textColor = [220,53,69];
+            else if(kol === 2) data.cell.styles.textColor = [230,163,23];
+            else data.cell.styles.textColor = [10,157,88];
+          }
+        },
+        columnStyles:{
+          0:{cellWidth:8, halign:'center'},
+          1:{cellWidth:50},
+          2:{cellWidth:28},
+          3:{cellWidth:25, halign:'right'},
+          4:{cellWidth:25, halign:'right'},
+          5:{cellWidth:18, halign:'center'},
+          6:{cellWidth:10, halign:'center'},
+          7:{cellWidth:22},
+        },
+      });
+      y = doc.lastAutoTable.finalY + 7;
+    }
+    
+    drawRingkasanFasilitasTable('Tabel 1: Semua Fasilitas Kredit', State.parsed.facilities);
+    drawRingkasanFasilitasTable('Tabel 2: Fasilitas Kredit Masih Aktif', activeFacsPdf);
+    drawRingkasanFasilitasTable('Tabel 3: Fasilitas Kredit Sudah Lunas', lunasFacsPdf);
+    
+    y += 1;
     
     // Konsistensi Identitas (NIK / Nama)
     const consist = State.consistency || buildIdentityConsistencyReport();
